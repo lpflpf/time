@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// Limit 类型，令牌发放的频率
 // Limit defines the maximum frequency of some events.
 // Limit is represented as number of events per second.
 // A zero Limit allows no events.
@@ -29,6 +30,7 @@ func Every(interval time.Duration) Limit {
 	return 1 / Limit(interval.Seconds())
 }
 
+// 令牌桶算法
 // A Limiter controls how frequently events are allowed to happen.
 // It implements a "token bucket" of size b, initially full and refilled
 // at rate r tokens per second.
@@ -53,15 +55,15 @@ func Every(interval time.Duration) Limit {
 //
 // The methods AllowN, ReserveN, and WaitN consume n tokens.
 type Limiter struct {
-	limit Limit
-	burst int
+	limit Limit // 放入桶的频率
+	burst int   // 桶的大小
 
 	mu     sync.Mutex
-	tokens float64
+	tokens float64 // 当前桶的个数
 	// last is the last time the limiter's tokens field was updated
-	last time.Time
+	last time.Time // 最近取走token的实践
 	// lastEvent is the latest time of a rate-limited event (past or future)
-	lastEvent time.Time
+	lastEvent time.Time // 最近限流时间的时间
 }
 
 // Limit returns the maximum overall event rate.
@@ -100,6 +102,9 @@ func (lim *Limiter) AllowN(now time.Time, n int) bool {
 	return lim.reserveN(now, n, 0).ok
 }
 
+// Reservation 对象类似于将Limiter 限流的权限下放给Reservation
+// Reservation 从Limiter 拿走了部分的tokens
+// 当调用Cancel，CancelAt 方法后，可以把保留的tokens 还给 Limiter
 // A Reservation holds information about events that are permitted by a Limiter to happen after a delay.
 // A Reservation may be canceled, which may enable the Limiter to permit additional events.
 type Reservation struct {
@@ -147,6 +152,7 @@ func (r *Reservation) Cancel() {
 	return
 }
 
+// 取消后归还token
 // CancelAt indicates that the reservation holder will not perform the reserved action
 // and reverses the effects of this Reservation on the rate limit as much as possible,
 // considering that other reservations may have already been made.
@@ -158,10 +164,12 @@ func (r *Reservation) CancelAt(now time.Time) {
 	r.lim.mu.Lock()
 	defer r.lim.mu.Unlock()
 
+	// 可能分配的tokens 已经过期了，不需要归还了
 	if r.lim.limit == Inf || r.tokens == 0 || r.timeToAct.Before(now) {
 		return
 	}
 
+	// 归还token
 	// calculate tokens to restore
 	// The duration between lim.lastEvent and r.timeToAct tells us how many tokens were reserved
 	// after r was obtained. These tokens should not be restored.
@@ -176,10 +184,12 @@ func (r *Reservation) CancelAt(now time.Time) {
 	if burst := float64(r.lim.burst); tokens > burst {
 		tokens = burst
 	}
+
+	// 更新对应的Limiter 的tokens 值，归还对应的token
 	// update state
 	r.lim.last = now
 	r.lim.tokens = tokens
-	if r.timeToAct == r.lim.lastEvent {
+	if r.timeToAct == r.lim.lastEvent { // 如果limiter 中 该 reservation 是最后一个操作的，那就把这个时间提前
 		prevEvent := r.timeToAct.Add(r.limit.durationFromTokens(float64(-r.tokens)))
 		if !prevEvent.Before(now) {
 			r.lim.lastEvent = prevEvent
@@ -303,6 +313,7 @@ func (lim *Limiter) SetBurstAt(now time.Time, newBurst int) {
 	lim.burst = newBurst
 }
 
+//  maxFutureReserve 最多可以等待的时间
 // reserveN is a helper method for AllowN, ReserveN, and WaitN.
 // maxFutureReserve specifies the maximum reservation wait duration allowed.
 // reserveN returns Reservation, not *Reservation, to avoid allocation in AllowN and WaitN.
@@ -324,6 +335,7 @@ func (lim *Limiter) reserveN(now time.Time, n int, maxFutureReserve time.Duratio
 	// Calculate the remaining number of tokens resulting from the request.
 	tokens -= float64(n)
 
+	// 计算需要等待的时间
 	// Calculate the wait duration
 	var waitDuration time.Duration
 	if tokens < 0 {
@@ -365,6 +377,7 @@ func (lim *Limiter) advance(now time.Time) (newNow time.Time, newLast time.Time,
 		last = now
 	}
 
+	// 目前有多少空闲时间
 	// Avoid making delta overflow below when last is very old.
 	maxElapsed := lim.limit.durationFromTokens(float64(lim.burst) - lim.tokens)
 	elapsed := now.Sub(last)
@@ -372,6 +385,7 @@ func (lim *Limiter) advance(now time.Time) (newNow time.Time, newLast time.Time,
 		elapsed = maxElapsed
 	}
 
+	// 通过limit计算可用桶的数量
 	// Calculate the new number of tokens, due to time that passed.
 	delta := lim.limit.tokensFromDuration(elapsed)
 	tokens := lim.tokens + delta
@@ -382,6 +396,7 @@ func (lim *Limiter) advance(now time.Time) (newNow time.Time, newLast time.Time,
 	return now, last, tokens
 }
 
+// tokens 个unit需要消耗多长时间
 // durationFromTokens is a unit conversion function from the number of tokens to the duration
 // of time it takes to accumulate them at a rate of limit tokens per second.
 func (limit Limit) durationFromTokens(tokens float64) time.Duration {
@@ -389,6 +404,7 @@ func (limit Limit) durationFromTokens(tokens float64) time.Duration {
 	return time.Nanosecond * time.Duration(1e9*seconds)
 }
 
+// d 时间内可以容纳多少个token
 // tokensFromDuration is a unit conversion function from a time duration to the number of tokens
 // which could be accumulated during that duration at a rate of limit tokens per second.
 func (limit Limit) tokensFromDuration(d time.Duration) float64 {
